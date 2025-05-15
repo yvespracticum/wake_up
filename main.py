@@ -1,21 +1,14 @@
-import asyncio
 import datetime
 import os
 import sqlite3
+import time
 
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.types import KeyboardButton
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from dotenv import load_dotenv
+from telebot import TeleBot, types
 load_dotenv()
-
-bot = Bot(token=os.getenv('TOKEN'))
-dp = Dispatcher()
-
+bot = TeleBot(os.getenv('BOT_TOKEN'))
 conn = sqlite3.connect('getup_times.db', check_same_thread=False)
 cursor = conn.cursor()
-
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS getup_times (
     user_id INTEGER,
@@ -25,90 +18,87 @@ CREATE TABLE IF NOT EXISTS getup_times (
 )
 ''')
 conn.commit()
+markup = types.ReplyKeyboardMarkup(resize_keyboard=True,
+                                   one_time_keyboard=False)
+markup.add('got up', '30 days avg')
 
 
-def get_keyboard():
-    builder = ReplyKeyboardBuilder()
-    builder.add(KeyboardButton(text='got up'),
-                KeyboardButton(text='this_month avg'))
-    return builder.as_markup(resize_keyboard=True)
+@bot.message_handler(commands=['start'])
+def handle_start(message):
+    bot.send_message(message.chat.id, '🌞ㅤ', reply_markup=markup)
 
 
-keyboard = get_keyboard()
-
-
-@dp.message(Command('start'))
-async def handle_start(message: types.Message):
-    await message.answer(':*', reply_markup=keyboard)
-
-
-@dp.message(F.text == 'got up')
-async def record_wakeup_time(message: types.Message):
+@bot.message_handler(func=lambda message: message.text == 'got up')
+def handle_got_up_button(message):
     user_id = message.from_user.id
     now = datetime.datetime.now()
-    current_date = now.strftime('%Y-%m-%d')
     current_time = now.strftime('%H:%M')
-
     try:
         cursor.execute(
-            'INSERT OR REPLACE INTO getup_times (user_id, date, '
-            'time) VALUES (?, ?, ?)',
-            (user_id, current_date, current_time))
+            'INSERT OR REPLACE INTO getup_times (user_id, date, time) VALUES '
+            '(?, ?, ?)',
+            (user_id, now.strftime('%Y-%m-%d'), current_time))
         conn.commit()
-        await message.answer(current_time, reply_markup=keyboard)
-        await asyncio.sleep(1)
-        await message.delete()
+        time.sleep(1)
+        bot.send_message(message.chat.id, current_time, reply_markup=markup)
+        time.sleep(1)
+        bot.delete_message(message.chat.id, message.message_id)
     except Exception as e:
-        await message.answer(str(e))
+        bot.send_message(message.chat.id, str(e), reply_markup=markup)
 
 
-@dp.message(F.text == 'this_month avg')
-async def show_this_month_average(message: types.Message):
+@bot.message_handler(func=lambda message: message.text == '30 days avg')
+def handle_month_abg_button(message):
     user_id = message.from_user.id
     now = datetime.datetime.now()
-    current_month = now.month
-    current_year = now.year
-
+    thirty_days_ago = (now - datetime.timedelta(days=30)).strftime('%Y-%m-%d')
     try:
         cursor.execute('''
         SELECT time FROM getup_times 
         WHERE user_id = ? 
-        AND strftime('%m', date) = ? 
-        AND strftime('%Y', date) = ?
-        ''', (user_id, f'{current_month:02d}', str(current_year)))
-
-        times_records = cursor.fetchall()
-        if not times_records:
-            answer = await message.answer(
-                'there are no getups in this month yet')
-            await asyncio.sleep(3)
-            await message.delete()
-            await bot.delete_message(chat_id=answer.chat.id,
-                                     message_id=answer.message_id)
-            return
-
-        total_minutes = 0
-        count = 0
-        for time_record in times_records:
-            hours, minutes = map(int, time_record[0].split(':'))
-            total_minutes += hours * 60 + minutes
-            count += 1
-
-        average_minutes = total_minutes / count
-        avg_hours = int(average_minutes // 60)
-        avg_minutes = int(average_minutes % 60)
-
-        await message.answer(
-            f'this_month avg: {avg_hours:02d}:{avg_minutes:02d}')
-        await asyncio.sleep(1)
-        await message.delete()
+        AND date >= ?
+        ''', (user_id, thirty_days_ago))
+        time_records = cursor.fetchall()
+        total_minutes = sum(
+            int(time_record[0].split(':')[0]) * 60 + int(
+                time_record[0].split(':')[1]) for time_record in time_records)
+        avg_min = total_minutes / len(time_records)
+        avg_time = f'{int(avg_min // 60):02d}:{int(avg_min % 60):02d}'
+        time.sleep(1)
+        bot.send_message(message.chat.id, f'30 days avg {avg_time}',
+                         reply_markup=markup)
+        time.sleep(1)
+        bot.delete_message(message.chat.id, message.message_id)
     except Exception as e:
-        await message.answer(str(e))
+        bot.send_message(message.chat.id, str(e), reply_markup=markup)
 
 
-async def main():
-    await dp.start_polling(bot)
+@bot.message_handler()
+def record_getup_time(message):
+    user_id = message.from_user.id
+    now = datetime.datetime.now()
+    current_date = now.strftime('%Y-%m-%d')
+    try:
+        time_text = message.text.strip()
+        if ':' in time_text:
+            hours, minutes = map(int, time_text.split(':'))
+        else:
+            time_str = time_text.zfill(4)
+            hours, minutes = int(time_str[:2]), int(time_str[2:])
+        if not (0 <= hours < 24 and 0 <= minutes < 60):
+            raise ValueError('incorrect time')
+        current_time = f'{hours:02d}:{minutes:02d}'
+        cursor.execute(
+            'INSERT OR REPLACE INTO getup_times VALUES (?, ?, ?)',
+            (user_id, current_date, current_time))
+        conn.commit()
+        time.sleep(1)
+        bot.send_message(message.chat.id, current_time, reply_markup=markup)
+        time.sleep(1)
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception as e:
+        bot.send_message(message.chat.id, str(e), reply_markup=markup)
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    bot.infinity_polling()
